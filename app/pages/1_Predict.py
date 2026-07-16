@@ -55,11 +55,32 @@ with right:
 
         # Load model and predict
         model = load_model(model_type, subset)
-        strength = predict(model, features_df)
+        
+        if model_type == "GP":
+            from src.gp_model import gp_predict_with_uncertainty
+            X_cols = get_feature_columns()
+            X = features_df[X_cols].values
+            mean, std = gp_predict_with_uncertainty(model, X)
+            strength = float(mean[0])
+            uncertainty_std = float(std[0])
+        else:
+            strength = predict(model, features_df)
 
         # ── Result ──────────────────────────────────────────────────
         st.subheader("Prediction Result")
-        st.metric("Predicted Compressive Strength", f"{strength:.2f} MPa")
+        if model_type == "GP":
+            c_res1, c_res2 = st.columns(2)
+            with c_res1:
+                st.metric("Predicted Compressive Strength", f"{strength:.2f} MPa")
+            with c_res2:
+                st.metric("Uncertainty (±1 Std Dev)", f"{uncertainty_std:.2f} MPa")
+            
+            # 90% prediction interval (mean +- 1.645 * std)
+            lower_bound = max(0.0, strength - 1.645 * uncertainty_std)
+            upper_bound = strength + 1.645 * uncertainty_std
+            st.markdown(f"**90% Prediction Interval:** `{lower_bound:.2f}` to `{upper_bound:.2f}` MPa")
+        else:
+            st.metric("Predicted Compressive Strength", f"{strength:.2f} MPa")
 
         # ── Derived Features ────────────────────────────────────────
         st.subheader("Derived Features")

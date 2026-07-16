@@ -19,11 +19,14 @@ Usage:
     python main_stage_b.py --skip-gp           # Skip GP (saves time)
     python main_stage_b.py --skip-stacking     # Skip stacking
     python main_stage_b.py --ablation          # Run full ablation study
+    python main_stage_b.py --resume            # Resume from checkpoint
+    python main_stage_b.py --clean             # Clear checkpoints
 """
 
 import argparse
 import json
 import os
+import random
 import sys
 import time
 import pickle
@@ -69,7 +72,12 @@ from src.uncertainty import (
     SplitConformalPredictor,
     evaluate_conformal_cv,
 )
+from src.checkpoint import TrainingCheckpoint
 
+# Reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
 
 MODEL_TYPES = ['XGBoost', 'CatBoost', 'LightGBM']
 
@@ -114,6 +122,18 @@ def parse_args():
         '--ablation', action='store_true',
         help='Run full ablation study (A→F experiments)',
     )
+    parser.add_argument(
+        '--resume', action='store_true',
+        help='Resume from the last checkpoint after a crash or interruption',
+    )
+    parser.add_argument(
+        '--clean', action='store_true',
+        help='Delete existing checkpoints and start a fresh run',
+    )
+    parser.add_argument(
+        '--checkpoint-dir', type=str, default='checkpoints',
+        help='Directory for checkpoint files (default: checkpoints)',
+    )
     return parser.parse_args()
 
 
@@ -133,6 +153,48 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(model_dir, exist_ok=True)
 
+    # ── Checkpoint setup ───────────────────────────────────────────────
+    ckpt = TrainingCheckpoint(
+        checkpoint_dir=args.checkpoint_dir,
+        pipeline_name='stage_b',
+    )
+
+    if args.clean:
+        ckpt.clean()
+
+    resumed = False
+    if args.resume and ckpt.exists:
+        loaded = ckpt.load()
+        if loaded:
+            resumed = True
+            current_args = {
+                'n_trials': n_trials,
+                'data': args.data,
+                'quick': args.quick,
+                'skip_gp': args.skip_gp,
+                'skip_stacking': args.skip_stacking,
+                'skip_conformal': args.skip_conformal,
+            }
+            ckpt.validate_args(current_args)
+            print("\n  +======================================================+")
+            print("  |          RESUMING FROM CHECKPOINT                   |")
+            print("  +======================================================+")
+            ckpt.print_status()
+    else:
+        # Fresh run — store pipeline args
+        ckpt.pipeline_args = {
+            'n_trials': n_trials,
+            'data': args.data,
+            'quick': args.quick,
+            'skip_gp': args.skip_gp,
+            'skip_stacking': args.skip_stacking,
+            'skip_conformal': args.skip_conformal,
+        }
+
+    # Use checkpoint's accumulated state if resuming
+    all_results = ckpt.all_results if resumed else []
+    all_best_params = ckpt.all_best_params if resumed else {}
+
     print("=" * 80)
     print("  STAGE B: PHYSICS-GUIDED STACKING ENSEMBLE PIPELINE")
     print("=" * 80)
@@ -143,6 +205,7 @@ def main():
     print(f"  Skip GP:                 {args.skip_gp or args.quick}")
     print(f"  Skip Stacking:           {args.skip_stacking}")
     print(f"  Skip Conformal:          {args.skip_conformal}")
+    print(f"  Resume mode:             {resumed}")
     print("=" * 80)
 
     pipeline_start = time.time()
@@ -184,8 +247,6 @@ def main():
 
     # ── STEP 5: Individual model evaluation (with constraints) ──────────
     print("\n[5/8] Training constrained gradient boosting models...")
-    all_results = []
-    all_best_params = {}
 
     for subset_name, subset_df in subsets.items():
         print(f"\n{'=' * 70}")
@@ -196,20 +257,34 @@ def main():
         y = subset_df['Compressive_Strength']
 
         # Baselines
-        print(f"\n  Baselines:")
-        baseline_results = evaluate_baselines(X, y)
-        for bname, bmetrics in baseline_results.items():
-            all_results.append({
-                'Subset': subset_name, 'Model': bname,
-                'RMSE_mean': bmetrics['RMSE_mean'],
-                'RMSE_std': bmetrics['RMSE_std'],
-                'MAE_mean': bmetrics['MAE_mean'],
-                'MAE_std': bmetrics['MAE_std'],
-                'R2_mean': bmetrics['R2_mean'],
-                'R2_std': bmetrics['R2_std'],
-            })
+        baseline_key = ckpt.make_key('baseline', subset_name)
+        if resumed and ckpt.is_complete(baseline_key):
+            print(f"\n  [OK] Baselines for {subset_name} -- already done, skipping.")
+        else:
+            print(f"\n  Baselines:")
+            baseline_results = evaluate_baselines(X, y)
+            baseline_rows = []
+            for bname, bmetrics in baseline_results.items():
+                baseline_rows.append({
+                    'Subset': subset_name, 'Model': bname,
+                    'RMSE_mean': bmetrics['RMSE_mean'],
+                    'RMSE_std': bmetrics['RMSE_std'],
+                    'MAE_mean': bmetrics['MAE_mean'],
+                    'MAE_std': bmetrics['MAE_std'],
+                    'R2_mean': bmetrics['R2_mean'],
+                    'R2_std': bmetrics['R2_std'],
+                })
+            ckpt.add_results(baseline_rows)
+            ckpt.mark_complete(baseline_key)
+            print(f"  [OK] Checkpoint saved for baselines/{subset_name}")
 
         for model_type in MODEL_TYPES:
+            model_key = ckpt.make_key(model_type, 'constrained', subset_name)
+
+            if resumed and ckpt.is_complete(model_key):
+                print(f"\n  [OK] {model_type}_constrained/{subset_name} -- already done, skipping.")
+                continue
+
             print(f"\n  -- {model_type} (with monotonic constraints) --")
             model_start = time.time()
 
@@ -233,7 +308,7 @@ def main():
             print(f"    MAE:  {results['MAE_mean']:.3f} ± {results['MAE_std']:.3f}")
             print(f"    R²:   {results['R2_mean']:.4f} ± {results['R2_std']:.4f}")
 
-            all_results.append({
+            result_row = {
                 'Subset': subset_name, 'Model': f'{model_type}_constrained',
                 'RMSE_mean': results['RMSE_mean'],
                 'RMSE_std': results['RMSE_std'],
@@ -241,10 +316,11 @@ def main():
                 'MAE_std': results['MAE_std'],
                 'R2_mean': results['R2_mean'],
                 'R2_std': results['R2_std'],
-            })
+            }
 
             best_params = results['best_params_per_fold'][0]
-            all_best_params[f"{model_type}_{subset_name}"] = best_params
+            ckpt.add_results([result_row], best_params=best_params,
+                             params_key=f"{model_type}_{subset_name}")
 
             # Save individual model
             print(f"  Saving {model_type} model for {subset_name}...")
@@ -254,11 +330,24 @@ def main():
             with open(model_path, 'wb') as f:
                 pickle.dump(final_model, f)
 
+            ckpt.mark_complete(model_key)
+            print(f"  [OK] Checkpoint saved for {model_type}_constrained/{subset_name}")
+
+    # Sync state from checkpoint
+    all_results = ckpt.all_results
+    all_best_params = ckpt.all_best_params
+
     # ── STEP 6: Stacking ensemble ───────────────────────────────────────
     if not args.skip_stacking:
         print("\n[6/8] Evaluating stacking ensemble...")
 
         for subset_name, subset_df in subsets.items():
+            stacking_key = ckpt.make_key('stacking', subset_name)
+
+            if resumed and ckpt.is_complete(stacking_key):
+                print(f"\n  [OK] Stacking for {subset_name} -- already done, skipping.")
+                continue
+
             print(f"\n  Stacking for {subset_name}...")
             X = subset_df[feature_cols]
             y = subset_df['Compressive_Strength']
@@ -282,7 +371,7 @@ def main():
             print(f"    RMSE: {stack_results['RMSE_mean']:.3f} ± {stack_results['RMSE_std']:.3f}")
             print(f"    R²:   {stack_results['R2_mean']:.4f} ± {stack_results['R2_std']:.4f}")
 
-            all_results.append({
+            stack_row = {
                 'Subset': subset_name, 'Model': 'Stacking_Ensemble',
                 'RMSE_mean': stack_results['RMSE_mean'],
                 'RMSE_std': stack_results['RMSE_std'],
@@ -290,7 +379,8 @@ def main():
                 'MAE_std': stack_results['MAE_std'],
                 'R2_mean': stack_results['R2_mean'],
                 'R2_std': stack_results['R2_std'],
-            })
+            }
+            ckpt.add_results([stack_row])
 
             # Train and save final stacking model on full data
             print(f"  Training final stacking model for {subset_name}...")
@@ -311,14 +401,26 @@ def main():
                 stack.fit(X_np, y_np)
                 stack_path = os.path.join(model_dir, f"Stacking_{subset_name}.pkl")
                 stack.save(stack_path)
+
+            ckpt.mark_complete(stacking_key)
+            print(f"  [OK] Checkpoint saved for stacking/{subset_name}")
     else:
         print("\n[6/8] Skipping stacking ensemble (--skip-stacking)")
+
+    # Sync state
+    all_results = ckpt.all_results
 
     # ── STEP 7: Gaussian Process ────────────────────────────────────────
     if not (args.skip_gp or args.quick):
         print("\n[7/8] Evaluating Gaussian Process regression...")
 
         for subset_name, subset_df in subsets.items():
+            gp_key = ckpt.make_key('gp', subset_name)
+
+            if resumed and ckpt.is_complete(gp_key):
+                print(f"\n  [OK] GP for {subset_name} -- already done, skipping.")
+                continue
+
             print(f"\n  GP for {subset_name}...")
             X = subset_df[feature_cols]
             y = subset_df['Compressive_Strength']
@@ -331,7 +433,7 @@ def main():
             print(f"    90% Coverage: {gp_results['Coverage90_mean']:.1f}%")
             print(f"    Mean Interval Width: {gp_results['MeanIntervalWidth']:.2f} MPa")
 
-            all_results.append({
+            gp_row = {
                 'Subset': subset_name, 'Model': 'GaussianProcess',
                 'RMSE_mean': gp_results['RMSE_mean'],
                 'RMSE_std': gp_results['RMSE_std'],
@@ -339,15 +441,22 @@ def main():
                 'MAE_std': gp_results['MAE_std'],
                 'R2_mean': gp_results['R2_mean'],
                 'R2_std': gp_results['R2_std'],
-            })
+            }
+            ckpt.add_results([gp_row])
 
             # Save final GP model
             gp_model = create_gp_model('matern')
             gp_model.fit(X.values, y.values)
             gp_path = os.path.join(model_dir, f"GP_{subset_name}.pkl")
             save_gp_model(gp_model, gp_path)
+
+            ckpt.mark_complete(gp_key)
+            print(f"  [OK] Checkpoint saved for gp/{subset_name}")
     else:
         print("\n[7/8] Skipping GP (--skip-gp or --quick)")
+
+    # Sync final state
+    all_results = ckpt.all_results
 
     # ── STEP 8: Summary & comparison ────────────────────────────────────
     print("\n[8/8] Generating final summary...")
@@ -379,9 +488,9 @@ def main():
     print(results_df.to_string(index=False))
 
     # Best model per subset
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print("  Best model per subset (by R²):")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     for subset in results_df['Subset'].unique():
         subset_results = results_df[results_df['Subset'] == subset]
         best_row = subset_results.loc[subset_results['R2_mean'].idxmax()]
@@ -392,9 +501,9 @@ def main():
     # Stage A comparison (if available)
     stage_a_path = os.path.join('outputs', 'stage_a_results_summary.csv')
     if os.path.exists(stage_a_path):
-        print(f"\n{'─' * 60}")
+        print(f"\n{'-' * 60}")
         print("  Stage A vs Stage B Comparison:")
-        print(f"{'─' * 60}")
+        print(f"{'-' * 60}")
         stage_a_df = pd.read_csv(stage_a_path)
         for subset in results_df['Subset'].unique():
             # Stage A best
@@ -407,8 +516,8 @@ def main():
                 delta_r2 = b_best['R2_mean'] - a_best['R2_mean']
                 delta_rmse = b_best['RMSE_mean'] - a_best['RMSE_mean']
                 print(f"  {subset:<6}: A={a_best['R2_mean']:.4f} ({a_best['Model']}) "
-                      f"→ B={b_best['R2_mean']:.4f} ({b_best['Model']})  "
-                      f"ΔR²={delta_r2:+.4f}  ΔRMSE={delta_rmse:+.3f}")
+                      f"-> B={b_best['R2_mean']:.4f} ({b_best['Model']})  "
+                      f"d_R2={delta_r2:+.4f}  d_RMSE={delta_rmse:+.3f}")
 
     print(f"\n{'=' * 80}")
     print(f"  Pipeline complete! Models: '{model_dir}/'  Results: '{output_dir}/'")

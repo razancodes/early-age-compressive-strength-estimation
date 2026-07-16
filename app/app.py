@@ -21,19 +21,19 @@ apply_styles()
 # ── Sidebar ─────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("Concrete Strength Predictor")
-    st.caption("Stage A — ML Baseline")
+    st.caption("Stage B — Physics-Guided Stacking & Uncertainty")
     st.markdown("[View on GitHub](https://github.com/razancodes/compressive-strength-estimation)")
 
     st.divider()
 
     st.markdown("""
-    **Models:** XGBoost, CatBoost, LightGBM
+    **Models:** XGBoost, CatBoost, LightGBM, Stacking, Gaussian Process
 
     **Trained on:** UCI Concrete Dataset
-    (1,005 samples, 22 features)
+    (1,030 samples, 30 features)
 
     **Validation:** 5-fold Nested CV
-    with 100 Optuna trials
+    with Monotonic Constraints
     """)
 
     st.divider()
@@ -58,28 +58,28 @@ with st.sidebar:
 st.header("Early-Age Concrete Compressive Strength Prediction")
 
 st.markdown("""
-Predict the compressive strength of concrete mixes using Optuna-optimized
-gradient boosting models trained on the UCI Concrete dataset.
+Predict the compressive strength of concrete mixes using physics-guided stacking ensembles
+and Gaussian Process regression models with conformal uncertainty intervals.
 """)
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("Trained Models", "12")
+    st.metric("Trained Models", "20")
 with col2:
-    st.metric("Best R-squared", "0.947")
+    st.metric("Best R-squared", "0.956")
 with col3:
-    st.metric("Best RMSE", "3.72 MPa")
+    st.metric("Best RMSE", "3.10 MPa")
 with col4:
-    st.metric("Training Samples", "1,005")
+    st.metric("Training Samples", "1,030")
 
 st.divider()
 
 st.subheader("Pages")
 
 pages = {
-    "Predict": "Enter a mix design and get an instant strength prediction with SHAP explanation.",
-    "Strength Curve": "Project strength development across ages 1 to 365 days for a single mix.",
-    "Compare Models": "Run all 12 model variants on the same input and compare predictions.",
+    "Predict": "Enter a mix design and get an instant strength prediction, conformal uncertainty interval, and SHAP explanation.",
+    "Strength Curve": "Project strength development across ages 1 to 365 days for a single mix, with uncertainty bounds.",
+    "Compare Models": "Run all 20 model variants on the same input and compare predictions.",
     "Training Results": "Browse all training metrics, scatter plots, residuals, and SHAP analysis.",
     "Batch Predict": "Upload a CSV of mix designs and download predictions.",
 }

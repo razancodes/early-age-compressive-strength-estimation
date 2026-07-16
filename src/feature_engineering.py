@@ -143,6 +143,21 @@ def engineer_features(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
         / df_feat['W_C_ratio'].clip(lower=1e-6)
     )
 
+    # ── Upstream validation ──────────────────────────────────────────────
+    # Flag rows with physically impossible zero-binder or zero-aggregate
+    bad_binder = df_feat['Binder'] <= 0
+    bad_agg = df_feat['Total_Aggregate'] <= 0
+    if bad_binder.any():
+        logger.warning(
+            f"{bad_binder.sum()} rows have Binder <= 0 (Cement + Slag + FA). "
+            f"Derived ratios will be unreliable for these rows."
+        )
+    if bad_agg.any():
+        logger.warning(
+            f"{bad_agg.sum()} rows have Total_Aggregate <= 0. "
+            f"Fine_Agg_ratio will be unreliable for these rows."
+        )
+
     # ── Sanity checks ───────────────────────────────────────────────────
     # Replace any infinities from division by zero
     df_feat.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -152,9 +167,13 @@ def engineer_features(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
         nan_cols = df_feat.columns[df_feat.isnull().any()].tolist()
         logger.warning(
             f"{n_nan} NaN values created during feature engineering "
-            f"in columns: {nan_cols}. Filling with 0."
+            f"in columns: {nan_cols}. Filling with column medians."
         )
-        df_feat.fillna(0, inplace=True)
+        # Use column medians (from non-NaN values) for physically plausible fill
+        for col in nan_cols:
+            median_val = df_feat[col].median()
+            fill_val = median_val if pd.notna(median_val) else 0.0
+            df_feat[col] = df_feat[col].fillna(fill_val)
 
     if verbose:
         n_raw = 8

@@ -14,11 +14,14 @@ Usage:
     python main.py                  # Full run (100 Optuna trials, ~4-7 hours)
     python main.py --quick          # Smoke test (10 trials, ~10-20 min)
     python main.py --n-trials 50    # Custom trial count
+    python main.py --resume         # Resume from last checkpoint after a crash
+    python main.py --clean          # Delete checkpoints and start fresh
 """
 
 import argparse
 import json
 import os
+import random
 import sys
 import time
 import warnings
@@ -52,8 +55,12 @@ from src.visualization import (
     plot_performance_heatmap,
     plot_eda,
 )
+from src.checkpoint import TrainingCheckpoint
 
 # Reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
 
 # Model types to evaluate
 MODEL_TYPES = ['XGBoost', 'CatBoost', 'LightGBM']
@@ -87,6 +94,18 @@ def parse_args():
         '--skip-group-cv', action='store_true',
         help='Skip group-based (mix-level) CV evaluation',
     )
+    parser.add_argument(
+        '--resume', action='store_true',
+        help='Resume from the last checkpoint after a crash or interruption',
+    )
+    parser.add_argument(
+        '--clean', action='store_true',
+        help='Delete existing checkpoints and start a fresh run',
+    )
+    parser.add_argument(
+        '--checkpoint-dir', type=str, default='checkpoints',
+        help='Directory for checkpoint files (default: checkpoints)',
+    )
     return parser.parse_args()
 
 
@@ -113,6 +132,42 @@ def main():
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
+    # ── Checkpoint setup ───────────────────────────────────────────────
+    ckpt = TrainingCheckpoint(
+        checkpoint_dir=args.checkpoint_dir,
+        pipeline_name='stage_a',
+    )
+
+    if args.clean:
+        ckpt.clean()
+
+    resumed = False
+    if args.resume and ckpt.exists:
+        loaded = ckpt.load()
+        if loaded:
+            resumed = True
+            current_args = {
+                'n_trials': n_trials,
+                'data': args.data,
+                'quick': args.quick,
+            }
+            ckpt.validate_args(current_args)
+            print("\n  +======================================================+")
+            print("  |          RESUMING FROM CHECKPOINT                   |")
+            print("  +======================================================+")
+            ckpt.print_status()
+    else:
+        # Fresh run — store pipeline args for future validation
+        ckpt.pipeline_args = {
+            'n_trials': n_trials,
+            'data': args.data,
+            'quick': args.quick,
+        }
+
+    # Use checkpoint's accumulated state if resuming, otherwise start fresh
+    all_results = ckpt.all_results if resumed else []
+    all_best_params = ckpt.all_best_params if resumed else {}
+
     # ================================================================
     print("=" * 80)
     print("  STAGE A: EARLY-AGE COMPRESSIVE STRENGTH PREDICTION — ML BASELINE")
@@ -120,6 +175,7 @@ def main():
     print(f"  Trials per model-subset: {n_trials}")
     print(f"  Quick mode:              {args.quick}")
     print(f"  Output directory:        {output_dir}")
+    print(f"  Resume mode:             {resumed}")
     print("=" * 80)
 
     pipeline_start = time.time()
@@ -156,10 +212,15 @@ def main():
 
     # ── STEP 5: Baseline evaluation ─────────────────────────────────────
     print("\n[5/7] Evaluating baseline models...")
-    all_results = []
     baseline_results_all = {}
 
     for subset_name, subset_df in subsets.items():
+        baseline_key = ckpt.make_key('baseline', subset_name)
+
+        if resumed and ckpt.is_complete(baseline_key):
+            print(f"\n  [OK] Baselines for {subset_name} -- already done, skipping.")
+            continue
+
         print(f"\n  Baselines for {subset_name} ({len(subset_df)} samples):")
         X = subset_df[feature_cols]
         y = subset_df['Compressive_Strength']
@@ -167,8 +228,9 @@ def main():
         baseline_results = evaluate_baselines(X, y)
         baseline_results_all[subset_name] = baseline_results
 
+        baseline_rows = []
         for model_name, metrics in baseline_results.items():
-            all_results.append({
+            row = {
                 'Subset': subset_name,
                 'Model': model_name,
                 'RMSE_mean': metrics['RMSE_mean'],
@@ -177,7 +239,8 @@ def main():
                 'MAE_std': metrics['MAE_std'],
                 'R2_mean': metrics['R2_mean'],
                 'R2_std': metrics['R2_std'],
-            })
+            }
+            baseline_rows.append(row)
 
             # Prediction plots for baselines
             plot_predictions(metrics['y_true'], metrics['y_pred'],
@@ -185,9 +248,15 @@ def main():
             plot_residuals(metrics['y_true'], metrics['y_pred'],
                            model_name, subset_name, output_dir)
 
+        ckpt.add_results(baseline_rows)
+        ckpt.mark_complete(baseline_key)
+        print(f"  [OK] Checkpoint saved for baselines/{subset_name}")
+
+    # Sync accumulated results from checkpoint
+    all_results = ckpt.all_results
+
     # ── STEP 6: Gradient boosting models ────────────────────────────────
     print("\n[6/7] Training gradient boosting models with Optuna optimization...")
-    all_best_params = {}
 
     for subset_name, subset_df in subsets.items():
         print(f"\n{'=' * 70}")
@@ -198,7 +267,13 @@ def main():
         y = subset_df['Compressive_Strength']
 
         for model_type in MODEL_TYPES:
-            print(f"\n  ── {model_type} ──")
+            model_key = ckpt.make_key(model_type, subset_name)
+
+            if resumed and ckpt.is_complete(model_key):
+                print(f"\n  [OK] {model_type}/{subset_name} -- already done, skipping.")
+                continue
+
+            print(f"\n  -- {model_type} --")
             model_start = time.time()
 
             # a) Nested cross-validation with Optuna
@@ -211,14 +286,14 @@ def main():
 
             elapsed = time.time() - model_start
             print(f"\n  Nested CV Results ({elapsed:.0f}s):")
-            print(f"    RMSE: {results['RMSE_mean']:.3f} ± {results['RMSE_std']:.3f} MPa")
-            print(f"    MAE:  {results['MAE_mean']:.3f} ± {results['MAE_std']:.3f} MPa")
-            print(f"    R²:   {results['R2_mean']:.4f} ± {results['R2_std']:.4f}")
-            print(f"    MAPE: {results['MAPE_mean']:.1f} ± {results['MAPE_std']:.1f}%")
-            print(f"    Max Error: {results['MaxError_mean']:.2f} ± {results['MaxError_std']:.2f} MPa")
+            print(f"    RMSE: {results['RMSE_mean']:.3f} +/- {results['RMSE_std']:.3f} MPa")
+            print(f"    MAE:  {results['MAE_mean']:.3f} +/- {results['MAE_std']:.3f} MPa")
+            print(f"    R2:   {results['R2_mean']:.4f} +/- {results['R2_std']:.4f}")
+            print(f"    MAPE: {results['MAPE_mean']:.1f} +/- {results['MAPE_std']:.1f}%")
+            print(f"    Max Error: {results['MaxError_mean']:.2f} +/- {results['MaxError_std']:.2f} MPa")
 
-            # Store results
-            all_results.append({
+            # Store results via checkpoint
+            result_row = {
                 'Subset': subset_name,
                 'Model': model_type,
                 'RMSE_mean': results['RMSE_mean'],
@@ -227,11 +302,13 @@ def main():
                 'MAE_std': results['MAE_std'],
                 'R2_mean': results['R2_mean'],
                 'R2_std': results['R2_std'],
-            })
+            }
 
             # Use the most common best params (from fold 1 for simplicity)
             best_params = results['best_params_per_fold'][0]
-            all_best_params[f"{model_type}_{subset_name}"] = best_params
+
+            ckpt.add_results([result_row], best_params=best_params,
+                             params_key=f"{model_type}_{subset_name}")
 
             # b) Prediction and residual plots
             plot_predictions(results['y_true'], results['y_pred'],
@@ -239,13 +316,20 @@ def main():
             plot_residuals(results['y_true'], results['y_pred'],
                            model_type, subset_name, output_dir)
 
-            # c) SHAP analysis (train final model on full subset)
+            # c) SHAP analysis (train on last outer fold to avoid data leakage)
             if not args.skip_shap:
                 print(f"  Computing SHAP analysis...")
+                from sklearn.model_selection import KFold as _KFold
+                _shap_cv = _KFold(n_splits=5, shuffle=True, random_state=42)
+                *_, (_shap_train_idx, _shap_test_idx) = _shap_cv.split(X)
+                X_shap_train = X.iloc[_shap_train_idx]
+                X_shap_test = X.iloc[_shap_test_idx]
+                y_shap_train = y.iloc[_shap_train_idx]
                 final_model = _create_final_model(model_type, best_params)
-                final_model.fit(X, y)
+                final_model.fit(X_shap_train, y_shap_train)
                 shap_values, top_features = shap_analysis(
-                    final_model, X, X, model_type, subset_name, output_dir,
+                    final_model, X_shap_train, X_shap_test,
+                    model_type, subset_name, output_dir,
                 )
 
             # d) Group-based CV (mix-level generalization)
@@ -258,6 +342,14 @@ def main():
                 )
                 print(f"    Group CV: RMSE={group_results['RMSE_mean']:.3f}, "
                       f"R²={group_results['R2_mean']:.4f}")
+
+            # Mark this (model, subset) unit as complete
+            ckpt.mark_complete(model_key)
+            print(f"  [OK] Checkpoint saved for {model_type}/{subset_name}")
+
+    # Sync final state from checkpoint
+    all_results = ckpt.all_results
+    all_best_params = ckpt.all_best_params
 
     # ── STEP 7: Summary & comparison ────────────────────────────────────
     print("\n[7/7] Generating final summary and comparison plots...")
@@ -293,14 +385,14 @@ def main():
     print(results_df.to_string(index=False))
 
     # Highlight best model per subset
-    print(f"\n{'─' * 50}")
-    print("  Best model per subset (by R²):")
-    print(f"{'─' * 50}")
+    print(f"\n{'-' * 50}")
+    print("  Best model per subset (by R2):")
+    print(f"{'-' * 50}")
     for subset in results_df['Subset'].unique():
         subset_results = results_df[results_df['Subset'] == subset]
         best_row = subset_results.loc[subset_results['R2_mean'].idxmax()]
         print(f"  {subset:<6}: {best_row['Model']:<18} "
-              f"R²={best_row['R2_mean']:.4f}  "
+              f"R2={best_row['R2_mean']:.4f}  "
               f"RMSE={best_row['RMSE_mean']:.3f} MPa")
 
     print(f"\n{'=' * 80}")

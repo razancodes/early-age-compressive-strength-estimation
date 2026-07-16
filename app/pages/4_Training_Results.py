@@ -19,7 +19,7 @@ apply_styles()
 
 st.header("Training Results")
 st.markdown("Browse all training metrics, prediction plots, residuals, "
-            "and SHAP analysis from the Stage A pipeline.")
+            "and SHAP analysis from the Stage B pipeline.")
 
 # ── Tab Layout ──────────────────────────────────────────────────────────
 tab_overview, tab_plots, tab_shap, tab_eda, tab_params = st.tabs([
@@ -33,14 +33,15 @@ with tab_overview:
     st.subheader("Performance Summary")
 
     results_df = load_results_df()
-    boost_df = results_df[results_df["Model"].isin(MODEL_TYPES)].copy()
-    baseline_df = results_df[~results_df["Model"].isin(MODEL_TYPES)].copy()
+    stage_b_models = ['XGBoost_constrained', 'CatBoost_constrained', 'LightGBM_constrained', 'Stacking_Ensemble', 'GaussianProcess']
+    boost_df = results_df[results_df["Model"].isin(stage_b_models)].copy()
+    baseline_df = results_df[~results_df["Model"].isin(stage_b_models)].copy()
 
     # Format for display
     display_cols = ["Subset", "Model", "RMSE_mean", "RMSE_std",
                     "MAE_mean", "MAE_std", "R2_mean", "R2_std"]
 
-    st.markdown("**Gradient Boosting Models (Nested CV)**")
+    st.markdown("**Stage B Constrained & Ensemble Models (Nested CV)**")
     st.dataframe(
         boost_df[display_cols].round(4),
         use_container_width=True, hide_index=True,
@@ -89,7 +90,7 @@ with tab_plots:
 
     c1, c2 = st.columns(2)
     with c1:
-        sel_model = st.selectbox("Model", MODEL_TYPES + ["LinearRegression", "RandomForest"],
+        sel_model = st.selectbox("Model", ["XGBoost", "CatBoost", "LightGBM", "LinearRegression", "RandomForest"],
                                  key="plots_model")
     with c2:
         sel_subset = st.selectbox("Subset", SUBSET_NAMES, key="plots_subset")
@@ -121,7 +122,7 @@ with tab_shap:
 
     c1, c2 = st.columns(2)
     with c1:
-        shap_model = st.selectbox("Model", MODEL_TYPES, key="shap_model")
+        shap_model = st.selectbox("Model", ["XGBoost", "CatBoost", "LightGBM"], key="shap_model")
     with c2:
         shap_subset = st.selectbox("Subset", SUBSET_NAMES, key="shap_subset")
 
@@ -210,7 +211,7 @@ with tab_params:
 
     params = load_hyperparameters()
 
-    for model_type in MODEL_TYPES:
+    for model_type in ["XGBoost", "CatBoost", "LightGBM"]:
         st.markdown(f"**{model_type}**")
         param_rows = []
         for subset in SUBSET_NAMES:

@@ -15,12 +15,15 @@ import pandas as pd
 import shap
 import streamlit as st
 
-# ── Paths ───────────────────────────────────────────────────────────────
 # Resolve paths relative to the project root (parent of app/)
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_APP_DIR)
-MODELS_DIR = os.path.join(_PROJECT_ROOT, "models")
-OUTPUTS_DIR = os.path.join(_PROJECT_ROOT, "outputs")
+MODELS_DIR = os.path.join(_PROJECT_ROOT, "models_stage_b")
+OUTPUTS_DIR = os.path.join(_PROJECT_ROOT, "outputs_stage_b")
+
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+from src.feature_engineering import engineer_features as _src_engineer_features
 
 # ── Input Field Definitions ────────────────────────────────────────────
 INPUT_FIELDS = [
@@ -46,7 +49,7 @@ DISPLAY_NAMES = {
     "Age": "Age",
 }
 
-MODEL_TYPES = ["XGBoost", "CatBoost", "LightGBM"]
+MODEL_TYPES = ["XGBoost", "CatBoost", "LightGBM", "Stacking", "GP"]
 SUBSET_NAMES = ["EA1", "EA7", "EA14", "Full"]
 
 # Best-practice defaults for missing values.
@@ -99,25 +102,43 @@ def autofill_missing(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 
 @st.cache_data
 def load_feature_config():
-    """Load feature_config.json from the models directory."""
-    path = os.path.join(MODELS_DIR, "feature_config.json")
-    with open(path, "r") as f:
-        return json.load(f)
+    """Load feature list from feature_columns.json."""
+    path = os.path.join(OUTPUTS_DIR, "feature_columns.json")
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    # Return Stage B fallback columns if file not generated yet
+    return [
+        "Cement", "Blast_Furnace_Slag", "Fly_Ash", "Water", "Superplasticizer",
+        "Coarse_Aggregate", "Fine_Aggregate", "Age", "Binder", "W_B_ratio",
+        "GGBS_ratio", "FlyAsh_ratio", "SCM_ratio", "Total_Aggregate",
+        "Fine_Agg_ratio", "Agg_Binder_ratio", "SP_per_binder", "log_Age",
+        "sqrt_Age", "Age_very_early", "Age_early", "Age_standard",
+        "W_C_ratio", "Cement_fraction", "gel_space_ratio", "effective_WB",
+        "age_wb_interaction", "GGBS_age_interaction", "FlyAsh_age_interaction",
+        "Binder_intensity"
+    ]
 
 
 @st.cache_data
 def load_results_df():
     """Load the training results summary CSV."""
-    path = os.path.join(OUTPUTS_DIR, "stage_a_results_summary.csv")
-    return pd.read_csv(path)
+    path = os.path.join(OUTPUTS_DIR, "stage_b_results_summary.csv")
+    if os.path.exists(path):
+        return pd.read_csv(path)
+    # Return empty DataFrame with expected columns if file does not exist
+    return pd.DataFrame(columns=["Subset", "Model", "RMSE_mean", "RMSE_std",
+                                 "MAE_mean", "MAE_std", "R2_mean", "R2_std"])
 
 
 @st.cache_data
 def load_hyperparameters():
     """Load best hyperparameters JSON."""
-    path = os.path.join(OUTPUTS_DIR, "best_hyperparameters.json")
-    with open(path, "r") as f:
-        return json.load(f)
+    path = os.path.join(OUTPUTS_DIR, "best_hyperparameters_stage_b.json")
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return {}
 
 
 # ── Model Loading (cached) ─────────────────────────────────────────────
@@ -157,7 +178,7 @@ def load_model(model_type: str, subset: str):
 
 def engineer_features(raw_input: dict) -> pd.DataFrame:
     """
-    Apply the 14 derived features to a raw 8-value input.
+    Apply the 22 derived features (Stage B) to a raw 8-value input.
 
     Parameters
     ----------
@@ -168,42 +189,18 @@ def engineer_features(raw_input: dict) -> pd.DataFrame:
     Returns
     -------
     pd.DataFrame
-        Single-row DataFrame with 22 features (8 raw + 14 engineered).
+        Single-row DataFrame with 30 features (8 raw + 22 engineered).
     """
     df = pd.DataFrame([raw_input])
-
-    # Binder system
-    df["Binder"] = df["Cement"] + df["Blast_Furnace_Slag"] + df["Fly_Ash"]
-    df["W_B_ratio"] = df["Water"] / df["Binder"]
-    df["GGBS_ratio"] = df["Blast_Furnace_Slag"] / df["Binder"]
-    df["FlyAsh_ratio"] = df["Fly_Ash"] / df["Binder"]
-    df["SCM_ratio"] = (df["Blast_Furnace_Slag"] + df["Fly_Ash"]) / df["Binder"]
-
-    # Aggregate
-    df["Total_Aggregate"] = df["Coarse_Aggregate"] + df["Fine_Aggregate"]
-    df["Fine_Agg_ratio"] = df["Fine_Aggregate"] / df["Total_Aggregate"]
-    df["Agg_Binder_ratio"] = df["Total_Aggregate"] / df["Binder"]
-
-    # Admixture
-    df["SP_per_binder"] = df["Superplasticizer"] / df["Binder"]
-
-    # Temporal
-    df["log_Age"] = np.log1p(df["Age"])
-    df["sqrt_Age"] = np.sqrt(df["Age"])
-    df["Age_very_early"] = (df["Age"] <= 3).astype(int)
-    df["Age_early"] = ((df["Age"] > 3) & (df["Age"] <= 7)).astype(int)
-    df["Age_standard"] = ((df["Age"] > 7) & (df["Age"] <= 28)).astype(int)
-
-    # Handle edge cases
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.fillna(0, inplace=True)
-
-    return df
+    df_feat = _src_engineer_features(df, verbose=False)
+    if "Compressive_Strength" in df_feat.columns:
+        df_feat = df_feat.drop(columns=["Compressive_Strength"])
+    return df_feat
 
 
 def engineer_features_batch(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Apply feature engineering to a multi-row DataFrame.
+    Apply Stage B feature engineering to a multi-row DataFrame.
 
     Parameters
     ----------
@@ -213,37 +210,22 @@ def engineer_features_batch(df_raw: pd.DataFrame) -> pd.DataFrame:
     Returns
     -------
     pd.DataFrame
-        DataFrame with 22 feature columns.
+        DataFrame with 30 feature columns.
     """
-    df = df_raw.copy()
-
-    df["Binder"] = df["Cement"] + df["Blast_Furnace_Slag"] + df["Fly_Ash"]
-    df["W_B_ratio"] = df["Water"] / df["Binder"]
-    df["GGBS_ratio"] = df["Blast_Furnace_Slag"] / df["Binder"]
-    df["FlyAsh_ratio"] = df["Fly_Ash"] / df["Binder"]
-    df["SCM_ratio"] = (df["Blast_Furnace_Slag"] + df["Fly_Ash"]) / df["Binder"]
-    df["Total_Aggregate"] = df["Coarse_Aggregate"] + df["Fine_Aggregate"]
-    df["Fine_Agg_ratio"] = df["Fine_Aggregate"] / df["Total_Aggregate"]
-    df["Agg_Binder_ratio"] = df["Total_Aggregate"] / df["Binder"]
-    df["SP_per_binder"] = df["Superplasticizer"] / df["Binder"]
-    df["log_Age"] = np.log1p(df["Age"])
-    df["sqrt_Age"] = np.sqrt(df["Age"])
-    df["Age_very_early"] = (df["Age"] <= 3).astype(int)
-    df["Age_early"] = ((df["Age"] > 3) & (df["Age"] <= 7)).astype(int)
-    df["Age_standard"] = ((df["Age"] > 7) & (df["Age"] <= 28)).astype(int)
-
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.fillna(0, inplace=True)
-
-    return df
+    df_feat = _src_engineer_features(df_raw, verbose=False)
+    if "Compressive_Strength" in df_feat.columns:
+        df_feat = df_feat.drop(columns=["Compressive_Strength"])
+    return df_feat
 
 
 # ── Prediction ──────────────────────────────────────────────────────────
 
 def get_feature_columns():
-    """Return the ordered list of 22 feature columns for model input."""
+    """Return the ordered list of 30 feature columns for model input."""
     config = load_feature_config()
-    return config["all_features"]
+    if isinstance(config, dict) and "all_features" in config:
+        return config["all_features"]
+    return config
 
 
 def predict(model, features_df: pd.DataFrame) -> float:
@@ -254,7 +236,7 @@ def predict(model, features_df: pd.DataFrame) -> float:
     ----------
     model : trained model
     features_df : pd.DataFrame
-        One-row DataFrame with 22 feature columns.
+        One-row DataFrame with 30 feature columns.
 
     Returns
     -------
@@ -281,6 +263,10 @@ def get_shap_explanation(model, features_df: pd.DataFrame):
 
     Returns a shap.Explanation object suitable for waterfall/force plots.
     """
+    class_name = type(model).__name__
+    if "Stacking" in class_name or "Pipeline" in class_name or "Ridge" in class_name:
+        raise ValueError("SHAP explanations are only supported for individual tree-based models (XGBoost, CatBoost, LightGBM).")
+
     cols = get_feature_columns()
     X = features_df[cols]
 

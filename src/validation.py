@@ -221,9 +221,7 @@ def group_cv_evaluation(
         'Cement', 'Blast_Furnace_Slag', 'Fly_Ash', 'Water',
         'Superplasticizer', 'Coarse_Aggregate', 'Fine_Aggregate',
     ]
-    mix_ids = df_raw[mix_cols].apply(
-        lambda row: '_'.join(row.astype(str)), axis=1
-    )
+    mix_ids = pd.util.hash_pandas_object(df_raw[mix_cols], index=False)
 
     n_unique_mixes = mix_ids.nunique()
     actual_folds = min(n_folds, n_unique_mixes)

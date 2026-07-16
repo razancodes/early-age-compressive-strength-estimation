@@ -50,13 +50,14 @@ with right:
             st.info("**Auto-filled values:**\n- " + "\n- ".join(fill_log))
 
         models_to_plot = MODEL_TYPES if show_all else [model_type]
-        colors = {"XGBoost": "#2196F3", "CatBoost": "#E64A19", "LightGBM": "#388E3C"}
+        colors = {"XGBoost": "#2196F3", "CatBoost": "#FF9800", "LightGBM": "#4CAF50", "Stacking": "#9C27B0", "GP": "#E64A19"}
 
         fig = go.Figure()
         results_table = []
 
         for mt in models_to_plot:
             predictions = []
+            stds = []
             subsets_used = []
 
             for age in ages:
@@ -67,8 +68,19 @@ with right:
 
                 model = load_model(mt, subset)
                 features_df = engineer_features(inp)
-                strength = predict(model, features_df)
-                predictions.append(strength)
+                
+                if mt == "GP":
+                    from src.gp_model import gp_predict_with_uncertainty
+                    X_cols = get_feature_columns()
+                    X = features_df[X_cols].values
+                    mean, std = gp_predict_with_uncertainty(model, X)
+                    strength = float(mean[0])
+                    predictions.append(strength)
+                    stds.append(float(std[0]))
+                else:
+                    strength = predict(model, features_df)
+                    predictions.append(strength)
+                    stds.append(0.0)
 
                 if mt == (models_to_plot[0]):
                     results_table.append({
@@ -85,6 +97,22 @@ with right:
                 line=dict(color=colors.get(mt, "#666"), width=2),
                 marker=dict(size=8),
             ))
+
+            if mt == "GP":
+                # Compute 90% confidence bands (1.645 * std)
+                lower_bounds = [max(0.0, p - 1.645 * s) for p, s in zip(predictions, stds)]
+                upper_bounds = [p + 1.645 * s for p, s in zip(predictions, stds)]
+                
+                fig.add_trace(go.Scatter(
+                    x=ages + ages[::-1],
+                    y=upper_bounds + lower_bounds[::-1],
+                    fill='toself',
+                    fillcolor='rgba(230, 74, 25, 0.12)', # Semi-transparent orange/red
+                    line=dict(color='rgba(255,255,255,0)'),
+                    hoverinfo="skip",
+                    showlegend=True,
+                    name="GP 90% Confidence Band",
+                ))
 
         # Reference lines
         for threshold in [20, 30, 40]:
@@ -127,7 +155,15 @@ with right:
                     subset = select_subset_for_age(age)
                     model = load_model(mt, subset)
                     features_df = engineer_features(inp)
-                    row[mt] = round(predict(model, features_df), 2)
+                    if mt == "GP":
+                        from src.gp_model import gp_predict_with_uncertainty
+                        X_cols = get_feature_columns()
+                        X = features_df[X_cols].values
+                        mean, std = gp_predict_with_uncertainty(model, X)
+                        row[mt] = round(float(mean[0]), 2)
+                        row["GP Std Dev"] = round(float(std[0]), 2)
+                    else:
+                        row[mt] = round(predict(model, features_df), 2)
                 table_data.append(row)
             st.dataframe(pd.DataFrame(table_data), use_container_width=True,
                          hide_index=True)

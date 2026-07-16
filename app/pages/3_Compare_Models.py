@@ -90,7 +90,7 @@ with right:
 
         # ── Bar Chart ───────────────────────────────────────────────
         st.subheader("Comparison Chart")
-        colors = {"XGBoost": "#2196F3", "CatBoost": "#E64A19", "LightGBM": "#388E3C"}
+        colors = {"XGBoost": "#2196F3", "CatBoost": "#FF9800", "LightGBM": "#4CAF50", "Stacking": "#9C27B0", "GP": "#E64A19"}
 
         fig = go.Figure()
         for mt in MODEL_TYPES:

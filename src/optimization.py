@@ -111,7 +111,8 @@ def objective_xgboost(trial, X, y, monotonic_constraints=None, quick=False):
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
             'random_state': 42,
-            'n_jobs': 1,
+            'n_jobs': -1,  # model-level threading is safe with sequential Optuna
+            'tree_method': 'hist',
         }
     else:
         params = {
@@ -123,7 +124,8 @@ def objective_xgboost(trial, X, y, monotonic_constraints=None, quick=False):
             'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 2.0),
             'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 10.0),
             'random_state': 42,
-            'n_jobs': 1,  # avoid nested parallelism with joblib on Windows
+            'n_jobs': -1,  # model-level OpenMP threading doesn't conflict with sequential Optuna
+            'tree_method': 'hist',
         }
 
     if monotonic_constraints is not None:
@@ -178,7 +180,7 @@ def objective_lightgbm(trial, X, y, monotonic_constraints=None, quick=False):
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
             'random_state': 42,
-            'n_jobs': 1,
+            'n_jobs': -1,  # model-level threading is safe with sequential Optuna
             'verbose': -1,
         }
     else:
@@ -192,7 +194,7 @@ def objective_lightgbm(trial, X, y, monotonic_constraints=None, quick=False):
             'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 10.0),
             'min_child_samples': trial.suggest_int('min_child_samples', 10, 50),
             'random_state': 42,
-            'n_jobs': 1,
+            'n_jobs': -1,  # model-level OpenMP threading doesn't conflict with sequential Optuna
             'verbose': -1,
         }
 
