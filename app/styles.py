@@ -29,10 +29,18 @@ CUSTOM_CSS = """
         padding: 12px 16px;
     }
 
+    /* Dark mode metric cards */
+    @media (prefers-color-scheme: dark) {
+        div[data-testid="metric-container"] {
+            background: #1a1a2e;
+            border: 1px solid #2d2d44;
+        }
+    }
+
     /* Sidebar styling */
     section[data-testid="stSidebar"] {
-        background: #1e2a3a;
-        border-right: 1px solid #2d3e50;
+        background: #1e1e1e;
+        border-right: 1px solid #2d2d2d;
     }
 
     /* Remove default padding from top */
@@ -40,6 +48,12 @@ CUSTOM_CSS = """
 
     /* Table styling */
     .stDataFrame { border-radius: 8px; }
+
+    /* Expander (info icon) styling */
+    .streamlit-expanderHeader {
+        font-size: 0.9rem;
+        font-weight: 500;
+    }
 </style>
 """
 
